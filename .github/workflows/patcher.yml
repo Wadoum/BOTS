@@ -42,50 +42,62 @@ jobs:
       - name: Installer dépendances
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip curl
+          sudo apt-get install -y wget unzip curl jq
           pip install -r requirements.txt
 
       - name: Répertoires
         run: mkdir -p data/input data/output data/logs tools
 
-      - name: Télécharger ReVanced CLI + Patches
+      - name: Télécharger ReVanced CLI (v6.0.0)
         run: |
-          set -e
-          echo "→ ReVanced CLI"
-          REVANCED_CLI_URL=$(curl -sSL https://api.github.com/repos/ReVanced/revanced-cli/releases/latest \
-            | grep "browser_download_url.*\.jar" | head -1 | cut -d'"' -f4)
-          echo "URL CLI: $REVANCED_CLI_URL"
-          curl -fsSL -o tools/revanced-cli.jar "$REVANCED_CLI_URL"
+          curl -fsSL -o tools/revanced-cli.jar \
+            "https://github.com/ReVanced/revanced-cli/releases/download/v6.0.0/revanced-cli-6.0.0-all.jar"
+          ls -lh tools/revanced-cli.jar
 
-          echo "→ ReVanced Patches"
-          REVANCED_PATCHES_URL=$(curl -sSL https://api.github.com/repos/ReVanced/revanced-patches/releases/latest \
-            | grep "browser_download_url.*\.jar\|browser_download_url.*\.mpp" | head -1 | cut -d'"' -f4)
-          echo "URL patches: $REVANCED_PATCHES_URL"
-          curl -fsSL -o tools/patches.jar "$REVANCED_PATCHES_URL"
+      - name: Télécharger ReVanced Patches (.rvp)
+        run: |
+          # Récupère l'URL réelle du bundle .rvp depuis l'API GitHub
+          PATCH_URL=$(curl -sSL https://api.github.com/repos/ReVanced/revanced-patches/releases/latest \
+            | jq -r '.assets[] | select(.name | endswith(".rvp")) | .browser_download_url' \
+            | head -1)
+          echo "URL patches: $PATCH_URL"
+          if [ -z "$PATCH_URL" ] || [ "$PATCH_URL" = "null" ]; then
+            echo "::error::Aucune URL .rvp trouvée dans la dernière release"
+            exit 1
+          fi
+          curl -fsSL -o tools/patches.rvp "$PATCH_URL"
+          ls -lh tools/patches.rvp
 
-          echo "→ uber-apk-signer"
+      - name: Télécharger uber-apk-signer
+        run: |
           curl -fsSL -o tools/uber-apk-signer.jar \
             "https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar"
-
-          ls -lh tools/
+          ls -lh tools/uber-apk-signer.jar
 
       - name: Télécharger l'APK
         run: |
           curl -fL --retry 3 -o data/input/original.apk "${{ github.event.inputs.file_url }}"
           ls -lh data/input/
 
-      - name: Analyser l'APK
+      - name: Analyse APK
         run: |
           python modules/apk_analyzer.py data/input/original.apk --pretty | tee data/logs/analyze.log || true
+
+      - name: Lister les patches compatibles
+        id: list
+        continue-on-error: true
+        run: |
+          java -jar tools/revanced-cli.jar list-patches \
+            --patches tools/patches.rvp \
+            --with-versions --with-packages 2>&1 | tee data/logs/patches-list.log | head -60
 
       - name: Patcher avec ReVanced
         id: revanced
         continue-on-error: true
         run: |
           java -jar tools/revanced-cli.jar patch \
-            --patches tools/patches.jar \
+            --patches tools/patches.rvp \
             --out data/output/patched.apk \
-            --exclusive \
             data/input/original.apk 2>&1 | tee data/logs/revanced.log || true
 
           if [ -s data/output/patched.apk ]; then
@@ -93,13 +105,12 @@ jobs:
             ls -lh data/output/patched.apk
           else
             echo "revanced_ok=false" >> $GITHUB_OUTPUT
-            echo "ReVanced n'a pas pu patcher cet APK (normal si non supporté)"
           fi
 
-      - name: Fallback (copie brute)
+      - name: Fallback (copie brute si ReVanced échoue)
         if: steps.revanced.outputs.revanced_ok != 'true'
         run: |
-          echo "ReVanced incompatible → copie de l'APK original pour signature"
+          echo "ReVanced n'a pas pu patcher cet APK → copie brute"
           cp data/input/original.apk data/output/patched.apk
 
       - name: Signature
@@ -120,18 +131,22 @@ jobs:
           set -e
           SIGNED=$(find data/output -name "*-signed.apk" -o -name "*-aligned-signed.apk" | head -1)
           if [ -z "$SIGNED" ]; then
-            echo "Fichiers présents :"
+            echo "::error::Aucun APK signé"
             ls -la data/output/
-            echo "::error::Aucun APK signé trouvé"
             exit 1
           fi
           SIZE=$(stat -c %s "$SIGNED")
-          echo "Envoi : $SIGNED ($SIZE octets)"
-          curl -sS -F "chat_id=$CHAT_ID" \
-            -F "caption=APK patché : ${FILE_NAME}" \
-            -F "document=@${SIGNED};filename=patched_${FILE_NAME}" \
-            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
-            | tee data/logs/telegram.log
+          MAX=$((50 * 1024 * 1024))
+          if [ "$SIZE" -gt "$MAX" ]; then
+            URL=$(curl -sS --upload-file "$SIGNED" "https://transfer.sh/${FILE_NAME}")
+            curl -sS -F "chat_id=$CHAT_ID" -F "text=Fichier trop gros : $URL" \
+              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage"
+          else
+            curl -sS -F "chat_id=$CHAT_ID" \
+              -F "caption=APK patché : ${FILE_NAME}" \
+              -F "document=@${SIGNED};filename=patched_${FILE_NAME}" \
+              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument"
+          fi
 
       - name: Notification échec
         if: failure()
@@ -143,7 +158,7 @@ jobs:
             -F "text=❌ Échec du patch. Logs : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" || true
 
-      - name: Logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
