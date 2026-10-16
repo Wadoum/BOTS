@@ -1,0 +1,30 @@
+name: Telegram DeepSeek Bot
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: self-hosted   # <-- plus de timeout, plus de limite RAM
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache modèle (4.4 Go, téléchargé une seule fois)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-deepseek-7b
+
+      - name: Installer dépendances
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential cmake
+          pip install -r requirements.txt
+
+      - name: Lancer le bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        run: python bot.py
