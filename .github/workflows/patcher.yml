@@ -45,10 +45,10 @@ jobs:
           sudo apt-get install -y wget unzip curl jq
           pip install -r requirements.txt
 
-      - name: Répertoires
-        run: mkdir -p data/input data/output data/logs tools
+      - name: Préparer répertoires
+        run: mkdir -p data/input data/output data/signed data/logs tools
 
-      - name: Télécharger ReVanced CLI (v6.0.0)
+      - name: Télécharger ReVanced CLI
         run: |
           curl -fsSL -o tools/revanced-cli.jar \
             "https://github.com/ReVanced/revanced-cli/releases/download/v6.0.0/revanced-cli-6.0.0-all.jar"
@@ -56,16 +56,9 @@ jobs:
 
       - name: Télécharger ReVanced Patches (.rvp)
         run: |
-          # Récupère l'URL réelle depuis l'API ReVanced v5
           PATCHES_INFO=$(curl -sSL https://api.revanced.app/v5/patches)
           PATCH_URL=$(echo "$PATCHES_INFO" | jq -r '.download_url')
-          PATCH_VERSION=$(echo "$PATCHES_INFO" | jq -r '.version')
-          echo "Version patches: $PATCH_VERSION"
           echo "URL patches: $PATCH_URL"
-          if [ -z "$PATCH_URL" ] || [ "$PATCH_URL" = "null" ]; then
-            echo "::error::Impossible d'obtenir l'URL des patches"
-            exit 1
-          fi
           curl -fsSL -o tools/patches.rvp "$PATCH_URL"
           ls -lh tools/patches.rvp
 
@@ -81,18 +74,9 @@ jobs:
           ls -lh data/input/
 
       - name: Analyse APK
-        run: |
-          python modules/apk_analyzer.py data/input/original.apk --pretty | tee data/logs/analyze.log || true
+        run: python modules/apk_analyzer.py data/input/original.apk --pretty | tee data/logs/analyze.log || true
 
-      - name: Lister les patches compatibles
-        id: list
-        continue-on-error: true
-        run: |
-          java -jar tools/revanced-cli.jar list-patches \
-            --patches tools/patches.rvp \
-            --with-versions --with-packages 2>&1 | tee data/logs/patches-list.log | head -60
-
-      - name: Patcher avec ReVanced
+      - name: Patch ReVanced
         id: revanced
         continue-on-error: true
         run: |
@@ -100,54 +84,53 @@ jobs:
             --patches tools/patches.rvp \
             --out data/output/patched.apk \
             data/input/original.apk 2>&1 | tee data/logs/revanced.log || true
-
           if [ -s data/output/patched.apk ]; then
-            echo "revanced_ok=true" >> $GITHUB_OUTPUT
-            ls -lh data/output/patched.apk
+            echo "ok=true" >> $GITHUB_OUTPUT
           else
-            echo "revanced_ok=false" >> $GITHUB_OUTPUT
+            echo "ok=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Fallback (copie brute si ReVanced échoue)
-        if: steps.revanced.outputs.revanced_ok != 'true'
-        run: |
-          echo "ReVanced n'a pas pu patcher cet APK → copie brute"
-          cp data/input/original.apk data/output/patched.apk
+      - name: Fallback copie
+        if: steps.revanced.outputs.ok != 'true'
+        run: cp data/input/original.apk data/output/patched.apk
 
       - name: Signature
         run: |
+          echo "=== Input ==="
+          ls -lh data/output/
+          echo "=== Signature ==="
           java -jar tools/uber-apk-signer.jar \
             --apks data/output/patched.apk \
-            --out data/output/ \
-            --overwrite 2>&1 | tee data/logs/sign.log
-          ls -lh data/output/
+            --out data/signed/ \
+            2>&1 | tee data/logs/sign.log
+          echo "=== Output ==="
+          ls -lh data/signed/ || echo "data/signed/ vide"
+
+      - name: Localiser APK signé
+        id: locate
+        run: |
+          SIGNED=$(find data/signed -type f -name "*.apk" | head -1)
+          if [ -z "$SIGNED" ]; then
+            echo "Pas d'APK signé, fallback copie"
+            cp data/output/patched.apk data/signed/fallback.apk
+            SIGNED="data/signed/fallback.apk"
+          fi
+          echo "signed_path=$SIGNED" >> $GITHUB_OUTPUT
+          ls -lh "$SIGNED"
 
       - name: Envoi Telegram
-        if: success()
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           FILE_NAME: ${{ github.event.inputs.file_name }}
+          SIGNED_PATH: ${{ steps.locate.outputs.signed_path }}
         run: |
-          set -e
-          SIGNED=$(find data/output -name "*-signed.apk" -o -name "*-aligned-signed.apk" | head -1)
-          if [ -z "$SIGNED" ]; then
-            echo "::error::Aucun APK signé"
-            ls -la data/output/
-            exit 1
-          fi
-          SIZE=$(stat -c %s "$SIGNED")
-          MAX=$((50 * 1024 * 1024))
-          if [ "$SIZE" -gt "$MAX" ]; then
-            URL=$(curl -sS --upload-file "$SIGNED" "https://transfer.sh/${FILE_NAME}")
-            curl -sS -F "chat_id=$CHAT_ID" -F "text=Fichier trop gros : $URL" \
-              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage"
-          else
-            curl -sS -F "chat_id=$CHAT_ID" \
-              -F "caption=APK patché : ${FILE_NAME}" \
-              -F "document=@${SIGNED};filename=patched_${FILE_NAME}" \
-              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument"
-          fi
+          SIZE=$(stat -c %s "$SIGNED_PATH")
+          echo "Envoi de $SIGNED_PATH ($SIZE octets)"
+          curl -sS -F "chat_id=$CHAT_ID" \
+            -F "caption=APK patché : ${FILE_NAME}" \
+            -F "document=@${SIGNED_PATH};filename=patched_${FILE_NAME}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" | tee data/logs/telegram.log
 
       - name: Notification échec
         if: failure()
@@ -156,7 +139,7 @@ jobs:
           CHAT_ID: ${{ github.event.inputs.chat_id }}
         run: |
           curl -sS -F "chat_id=$CHAT_ID" \
-            -F "text=❌ Échec du patch. Logs : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -F "text=❌ Échec. Logs : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" || true
 
       - name: Upload logs
