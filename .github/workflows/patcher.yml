@@ -56,13 +56,14 @@ jobs:
 
       - name: Télécharger ReVanced Patches (.rvp)
         run: |
-          # Récupère l'URL réelle du bundle .rvp depuis l'API GitHub
-          PATCH_URL=$(curl -sSL https://api.github.com/repos/ReVanced/revanced-patches/releases/latest \
-            | jq -r '.assets[] | select(.name | endswith(".rvp")) | .browser_download_url' \
-            | head -1)
+          # Récupère l'URL réelle depuis l'API ReVanced v5
+          PATCHES_INFO=$(curl -sSL https://api.revanced.app/v5/patches)
+          PATCH_URL=$(echo "$PATCHES_INFO" | jq -r '.download_url')
+          PATCH_VERSION=$(echo "$PATCHES_INFO" | jq -r '.version')
+          echo "Version patches: $PATCH_VERSION"
           echo "URL patches: $PATCH_URL"
           if [ -z "$PATCH_URL" ] || [ "$PATCH_URL" = "null" ]; then
-            echo "::error::Aucune URL .rvp trouvée dans la dernière release"
+            echo "::error::Impossible d'obtenir l'URL des patches"
             exit 1
           fi
           curl -fsSL -o tools/patches.rvp "$PATCH_URL"
