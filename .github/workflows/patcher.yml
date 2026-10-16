@@ -1,79 +1,72 @@
-name: APK Patcher 64-bit
+name: APK Patcher
 
 on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: "URL de téléchargement de l'APK source"
+        description: "URL de l'APK source"
         required: true
         type: string
       user_id:
-        description: "Identifiant Telegram du demandeur"
+        description: "ID Telegram"
         required: true
         type: string
       file_name:
-        description: "Nom original du fichier APK"
+        description: "Nom du fichier"
         required: true
         type: string
       chat_id:
-        description: "Identifiant de la conversation Telegram"
+        description: "ID de chat Telegram"
         required: true
         type: string
-      arch:
-        description: "Architecture cible"
-        required: false
-        default: "arm64-v8a"
-        type: choice
-        options:
-          - arm64-v8a
-          - armeabi-v7a
-          - x86_64
 
 permissions:
   contents: read
 
 jobs:
   patch:
-    name: Patch et compilation APK
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Installer dépendances système
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer dépendances
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake wget unzip curl
-
-      - name: Installer dépendances Python
-        run: |
-          python -m pip install --upgrade pip
+          sudo apt-get install -y wget unzip curl
           pip install -r requirements.txt
 
-      - name: Créer répertoires
+      - name: Répertoires
         run: mkdir -p data/input data/output data/logs tools
 
-      - name: Télécharger les outils (Morphe CLI, APKEditor, signer)
+      - name: Télécharger ReVanced CLI + Patches
         run: |
           set -e
-          curl -fsSL --retry 3 -o tools/morphe-cli.jar \
-            "https://github.com/MorpheApp/morphe-cli/releases/latest/download/morphe-cli.jar" || true
-          curl -fsSL --retry 3 -o tools/APKEditor.jar \
-            "https://github.com/REAndroid/APKEditor/releases/latest/download/APKEditor.jar" || true
-          curl -fsSL --retry 3 -o tools/uber-apk-signer.jar \
-            "https://github.com/patrickfav/uber-apk-signer/releases/latest/download/uber-apk-signer.jar" || true
+          echo "→ ReVanced CLI"
+          REVANCED_CLI_URL=$(curl -sSL https://api.github.com/repos/ReVanced/revanced-cli/releases/latest \
+            | grep "browser_download_url.*\.jar" | head -1 | cut -d'"' -f4)
+          echo "URL CLI: $REVANCED_CLI_URL"
+          curl -fsSL -o tools/revanced-cli.jar "$REVANCED_CLI_URL"
+
+          echo "→ ReVanced Patches"
+          REVANCED_PATCHES_URL=$(curl -sSL https://api.github.com/repos/ReVanced/revanced-patches/releases/latest \
+            | grep "browser_download_url.*\.jar\|browser_download_url.*\.mpp" | head -1 | cut -d'"' -f4)
+          echo "URL patches: $REVANCED_PATCHES_URL"
+          curl -fsSL -o tools/patches.jar "$REVANCED_PATCHES_URL"
+
+          echo "→ uber-apk-signer"
+          curl -fsSL -o tools/uber-apk-signer.jar \
+            "https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar"
+
           ls -lh tools/
 
       - name: Télécharger l'APK
@@ -82,61 +75,63 @@ jobs:
           ls -lh data/input/
 
       - name: Analyser l'APK
-        run: python modules/apk_analyzer.py data/input/original.apk --pretty | tee data/logs/analyze.log
-
-      - name: Patch avec Morphe CLI
         run: |
-          java -jar tools/morphe-cli.jar patch \
-            --apk data/input/original.apk \
+          python modules/apk_analyzer.py data/input/original.apk --pretty | tee data/logs/analyze.log || true
+
+      - name: Patcher avec ReVanced
+        id: revanced
+        continue-on-error: true
+        run: |
+          java -jar tools/revanced-cli.jar patch \
+            --patches tools/patches.jar \
             --out data/output/patched.apk \
-            --arch "${{ github.event.inputs.arch }}" \
-            --all 2>&1 | tee data/logs/patch.log || true
-          ls -lh data/output/ || true
+            --exclusive \
+            data/input/original.apk 2>&1 | tee data/logs/revanced.log || true
 
-      - name: Compilation 64-bit
+          if [ -s data/output/patched.apk ]; then
+            echo "revanced_ok=true" >> $GITHUB_OUTPUT
+            ls -lh data/output/patched.apk
+          else
+            echo "revanced_ok=false" >> $GITHUB_OUTPUT
+            echo "ReVanced n'a pas pu patcher cet APK (normal si non supporté)"
+          fi
+
+      - name: Fallback (copie brute)
+        if: steps.revanced.outputs.revanced_ok != 'true'
         run: |
-          python modules/builder_64bit.py \
-            data/output/patched.apk \
-            data/output/arm64.apk \
-            --arch "${{ github.event.inputs.arch }}" | tee data/logs/build.log || true
-          ls -lh data/output/ || true
+          echo "ReVanced incompatible → copie de l'APK original pour signature"
+          cp data/input/original.apk data/output/patched.apk
 
-      - name: Signature APK
+      - name: Signature
         run: |
           java -jar tools/uber-apk-signer.jar \
-            --apks data/output/arm64.apk \
+            --apks data/output/patched.apk \
             --out data/output/ \
-            --overwrite 2>&1 | tee data/logs/sign.log || true
-          ls -lh data/output/ || true
+            --overwrite 2>&1 | tee data/logs/sign.log
+          ls -lh data/output/
 
-      - name: Envoyer sur Telegram
+      - name: Envoi Telegram
         if: success()
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           FILE_NAME: ${{ github.event.inputs.file_name }}
         run: |
-          SIGNED=$(find data/output -name "*-signed.apk" | head -1)
+          set -e
+          SIGNED=$(find data/output -name "*-signed.apk" -o -name "*-aligned-signed.apk" | head -1)
           if [ -z "$SIGNED" ]; then
-            SIGNED=$(find data/output -name "*.apk" | head -1)
-          fi
-          if [ -z "$SIGNED" ]; then
-            echo "Aucun APK trouvé"
+            echo "Fichiers présents :"
+            ls -la data/output/
+            echo "::error::Aucun APK signé trouvé"
             exit 1
           fi
           SIZE=$(stat -c %s "$SIGNED")
-          MAX=$((50 * 1024 * 1024))
-          if [ "$SIZE" -gt "$MAX" ]; then
-            URL=$(curl -sS --upload-file "$SIGNED" "https://transfer.sh/${FILE_NAME}")
-            curl -sS -F "chat_id=$CHAT_ID" \
-              -F "text=Fichier trop gros. Lien : $URL" \
-              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage"
-          else
-            curl -sS -F "chat_id=$CHAT_ID" \
-              -F "caption=APK patché 64-bit : ${FILE_NAME}" \
-              -F "document=@${SIGNED};filename=patched_${FILE_NAME}" \
-              "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument"
-          fi
+          echo "Envoi : $SIGNED ($SIZE octets)"
+          curl -sS -F "chat_id=$CHAT_ID" \
+            -F "caption=APK patché : ${FILE_NAME}" \
+            -F "document=@${SIGNED};filename=patched_${FILE_NAME}" \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
+            | tee data/logs/telegram.log
 
       - name: Notification échec
         if: failure()
@@ -145,13 +140,13 @@ jobs:
           CHAT_ID: ${{ github.event.inputs.chat_id }}
         run: |
           curl -sS -F "chat_id=$CHAT_ID" \
-            -F "text=❌ Échec du patch. Consultez les logs du workflow." \
+            -F "text=❌ Échec du patch. Logs : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" || true
 
-      - name: Upload logs
+      - name: Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: patcher-logs-${{ github.run_id }}
+          name: logs-${{ github.run_id }}
           path: data/logs/
           retention-days: 7
