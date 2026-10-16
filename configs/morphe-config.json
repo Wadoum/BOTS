@@ -1,0 +1,152 @@
+{
+  "$schema": "https://morphe.app/schemas/patch-options-v1.json",
+  "configVersion": "1.0",
+  "metadata": {
+    "name": "BOTS APK Patcher",
+    "description": "Configuration de patch par défaut pour le pipeline GitHub Actions",
+    "targetArchitecture": "arm64-v8a",
+    "supportedArchitectures": [
+      "arm64-v8a",
+      "armeabi-v7a",
+      "x86_64"
+    ]
+  },
+  "build": {
+    "architecture": "arm64-v8a",
+    "stripNativeLibs": false,
+    "keepOnlyTargetArch": true,
+    "signAfterPatch": true,
+    "zipalign": true,
+    "compressionLevel": 6
+  },
+  "patchPolicy": {
+    "mode": "auto",
+    "applyAllCompatible": true,
+    "skipIncompatible": true,
+    "failOnMissingDependency": false,
+    "verifyAfterPatch": true,
+    "maxRetries": 2,
+    "retryDelaySeconds": 5
+  },
+  "excludedPatches": [
+    "debug-mode",
+    "force-root-check",
+    "disable-signature-verification"
+  ],
+  "includedPatches": [],
+  "patchOptions": {
+    "custom-branding": {
+      "enabled": false,
+      "appName": "Patched",
+      "iconPath": ""
+    },
+    "premium-unlock": {
+      "enabled": true,
+      "checkLicense": false,
+      "patchBilling": true,
+      "patchPlayStore": true
+    },
+    "ads-removal": {
+      "enabled": true,
+      "blockGoogleAds": true,
+      "blockMetaAds": true,
+      "blockUnityAds": true,
+      "blockAppLovinAds": true,
+      "blockAdMobAds": true,
+      "blockIronSourceAds": true
+    },
+    "analytics-disable": {
+      "enabled": true,
+      "blockFirebase": true,
+      "blockGoogleAnalytics": true,
+      "blockFacebookAnalytics": true,
+      "blockMixpanel": true,
+      "blockAmplitude": true
+    },
+    "signature-verification-disable": {
+      "enabled": true,
+      "injectProtection": false
+    },
+    "root-detection-disable": {
+      "enabled": true,
+      "hideSuBinary": true,
+      "hideMagiskPaths": true
+    },
+    "pro-features-unlock": {
+      "enabled": true,
+      "unlockPremium": true,
+      "unlockTrial": true,
+      "bypassSubscriptionCheck": true
+    },
+    "trial-reset": {
+      "enabled": false,
+      "resetCount": 1
+    },
+    "debug-flags": {
+      "enabled": false
+    },
+    "network-security": {
+      "enabled": false,
+      "allowCleartext": false,
+      "userCertificates": false
+    },
+    "optimize-resources": {
+      "enabled": true,
+      "removeUnusedLocales": false,
+      "removeUnusedDensities": false,
+      "keepDefaultLocale": "en",
+      "keepLocales": [
+        "en",
+        "fr"
+      ]
+    },
+    "screen-capture-disable": {
+      "enabled": false
+    },
+    "min-sdk-override": {
+      "enabled": false,
+      "minSdk": 24
+    },
+    "target-sdk-override": {
+      "enabled": false,
+      "targetSdk": 34
+    },
+    "version-override": {
+      "enabled": false,
+      "versionCode": null,
+      "versionName": null
+    }
+  },
+  "resourcePatches": {
+    "strings": {},
+    "icons": {},
+    "manifests": {
+      "removePermissions": [],
+      "addPermissions": []
+    }
+  },
+  "signing": {
+    "enabled": true,
+    "debugKey": true,
+    "customKeystorePath": "",
+    "keystorePasswordEnv": "KEYSTORE_PASSWORD",
+    "keyAliasEnv": "KEYSTORE_ALIAS",
+    "keyPasswordEnv": "KEY_PASSWORD"
+  },
+  "output": {
+    "fileNamePattern": "{original_name}_patched_{arch}.apk",
+    "cleanIntermediate": true,
+    "verbose": false
+  },
+  "safety": {
+    "maxApkSizeBytes": 536870912,
+    "minApkSizeBytes": 1048576,
+    "verifyChecksum": false,
+    "allowedPackages": [],
+    "blockedPackages": [
+      "com.android.systemui",
+      "android",
+      "com.android.settings"
+    ]
+  }
+}
